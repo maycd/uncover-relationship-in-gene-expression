@@ -1,0 +1,318 @@
+---
+title: "Uncovering Relationship in Gene Expression"
+author: "maycd"
+output:
+  html_document:
+    code_folding: show
+    highlight: haddock
+    theme: lumen
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+  pdf_document:
+    toc: yes
+    toc_depth: "3"
+---
+
+<style>
+#TOC {
+  color: #708090;
+  font-family: Calibri;
+  font-size: 16px;
+  border-color: #708090;
+}
+#header {
+  color: #F08080;
+  font-family: Calibri;
+  font-size: 20px;
+  background-color: #F5F5F5;
+  opacity: 0.6;
+}
+body {
+  color: #708090;
+  font-family: Calibri;
+  background-color: #F5F5F5;
+}
+</style>
+
+```{r setup, include=FALSE}
+rm(list=ls())
+knitr::opts_chunk$set(echo = TRUE, fig.width=6, fig.height=4)
+if(!require('pacman')) {
+  install.packages('pacman')
+}
+pacman::p_load(ggplot2, dplyr, DiscriMiner, caret, pROC, MASS, e1071, GGally, devtools, ggfortify, nnet, car, dendextend, RColorBrewer)
+```
+
+\pagebreak
+# Lung Cancer Data
+
+```{r}
+lung <- data.matrix(read.table("lungcancer.txt"))
+```
+
+Heatmap of expression of gene vs sample
+
+```{r}
+heatmap(lung, Colv=NA, scale="row", 
+        col=rev(brewer.pal(9,"RdBu")))
+legend(x = "bottomright", legend = c("low", "medium", "high"),
+       cex = 0.8, fill = colorRampPalette(brewer.pal(9,"RdBu"))(3))
+```
+
+Heatmap without outliers
+
+```{r}
+heatmap(lung[,-c(23)], scale="row", 
+        col=rev(brewer.pal(9,"RdBu")))
+legend(x = "bottomright", legend = c("low", "medium", "high"),
+       cex = 0.8, fill = colorRampPalette(brewer.pal(9,"RdBu"))(3))
+```
+
+Transpose and normalize the data by subtracting the mean
+
+```{r}
+lung <- scale(t(lung), scale = F)
+```
+
+## 1 PCA
+### 1.1 PCA and anomaly detection
+
+```{r}
+pca_res0 <- prcomp(lung, scale=T)
+summary(pca_res0)
+```
+
+Add sample labels as factor to the data
+
+```{r}
+lung_df0 <- data.frame(lung)
+lung_df0$Label <- c(rep("Carcinoid",20), rep("Colon", 13), rep("Normal", 17), rep("SmallCell", 6))
+lung_df0$Label <- factor(lung_df0$Label)
+dim(lung_df0)
+```
+
+```{r}
+lung_df0[1:3,12623:12626]
+```
+
+Plot the first two principal components
+
+```{r}
+autoplot(pca_res0, data = lung_df0, shape = F, colour = "Label", frame = T, frame.type = "t")
+```
+
+The 23rd sample is an outlier to be removed. It is far away from other samples in the group of Colon.
+
+```{r}
+lung_df1 <- lung_df0[-c(23),]
+dim(lung_df1)
+```
+
+```{r}
+pca_res1 <- prcomp(lung_df1[,-c(12626)], scale=T)
+summary(pca_res1)
+```
+
+```{r}
+autoplot(pca_res1, data = lung_df1, shape = "Label", colour = "Label", frame = T, frame.type = "t")
+```
+
+The loadings of the three principal components on some genes
+
+```{r}
+pca_res1_loading <- data.frame(round(pca_res1$rotation[,1:3], 4))
+head(pca_res1_loading)
+```
+Heatmap of loading on gene vs PC
+
+```{r}
+heatmap(pca_res1$rotation[,1:3], Colv=NA, scale="row", 
+        col=rev(brewer.pal(9,"RdBu")))
+legend(x = "bottomright", legend = c("low", "medium", "high"),
+       cex = 0.8, fill = colorRampPalette(brewer.pal(9,"RdBu"))(3))
+```
+
+```{r}
+head(pca_res1_loading[order(-pca_res1_loading$PC1, -pca_res1_loading$PC2, -pca_res1_loading$PC3), ])
+```
+
+It appears that the contrast of some genes vs. other genes constituting PC1 influences the response the most.
+
+### 2.1.2 Scree plot
+
+```{r}
+screeplot(pca_res1)
+```
+
+There is a marked decrease in the variance explained by further principal components.
+
+```{r}
+pve <- 100 * pca_res1$sdev^2 / sum(pca_res1$sdev^2)
+par(mfrow = c(1, 2))
+plot(pve, type = "o", ylab = "PVE", xlab = "Principal Component", col = "blue")
+plot(cumsum(pve), type = "o", ylab = "Cumulative PVE",
+xlab = "Principal Component", col = "brown3")
+```
+
+The first three components explain about 40% of the variation in data. However, there is an elbow in the plot after approximately the third principal component in the scree plot. Thus, the three components are sufficient.
+
+### 1.3 Pair-wise scatterplots
+
+```{r}
+pairs(pca_res1$x[,1:3], col=lung_df1$Label, pch=as.numeric(lung_df1$Label))
+```
+
+They are pairwise uncorrelated.
+
+## 2 Nominal Logistic Regression, LDA and SVM
+
+```{r}
+lung_df2 <- data.frame(pca_res1$x[,1:3])
+lung_df2$Label <- lung_df1$Label
+dim(lung_df2)
+```
+
+### 2.1 Nominal logistic regression
+
+```{r}
+lung.mult <- multinom(Label ~ ., data = lung_df2)
+summary(lung.mult)
+```
+
+With one-unit increase in PC1, the probability of Colon to the probability of Carcinoid will increase by a multiplicative factor of $e^{9.112873}$.
+
+```{r}
+Anova(lung.mult)
+```
+
+The p-values are less than 0.05. The variables are significant.
+
+### 2.2 LDA
+
+```{r}
+lung.lda <- linDA(lung_df2[,1:3], lung_df2$Label)
+lung.lda$functions
+```
+
+$$
+\begin{aligned}
+\hat{c}(Carcinoid|PC1,PC2,PC3) 
+& = -14.5596-0.3310*PC1+0.3402*PC2+0.0983*PC3\\
+\hat{c}(Colon|PC1,PC2,PC3) 
+& = -9.8753+0.1481*PC1-0.3040*PC2+0.0308*PC3\\
+\dots
+\end{aligned}
+$$
+
+```{r}
+confusionMatrix(lung.lda$classification, lung_df2$Label)
+```
+
+The vast majority of data points are classified correctly.
+
+### 2.3 Linear SVM
+
+From the plot in 2.1.1, the points are not linearly separable.
+
+```{r}
+lung.svm1 <- svm(Label ~ ., data = lung_df2, kernel = "linear",
+cost = 10, scale = FALSE)
+summary(lung.svm1)
+```
+
+The indeces of support vectors are
+
+```{r}
+print(lung.svm1$index)
+```
+
+```{r}
+set.seed(1)
+tune.out <- tune(svm, Label ~ ., data = lung_df2, kernel = "linear", 
+                 ranges = list(cost = c(0.001, 0.01, 0.1, 1, 5, 10, 100)))
+summary(tune.out)
+```
+
+We see that cost = 1 results in the lowest cross-validation error rate. The best SVM model is
+
+```{r}
+lung.svm.bestmod <- tune.out$best.model
+summary(lung.svm.bestmod)
+```
+
+## 3 Clustering
+
+Clustering with K = 4 using the first 3 PC's and data without outliers.
+
+### 3.1 Hierarchical clustering
+
+```{r}
+sd.data <- scale(lung_df2[,1:3])
+hc.complete <- hclust(dist(sd.data), method = "complete")
+hc.average <- hclust(dist(sd.data), method = "average")
+hc.single <- hclust(dist(sd.data), method = "single")
+```
+
+```{r}
+par(mfrow = c(1,3))
+plot(hc.complete, main = "Complete Linkage", xlab = "", sub = "", cex = .9, labels = F)
+plot(hc.average, main = "Average Linkage", xlab = "", sub = "", cex = .9, labels = F)
+plot(hc.single, main = "Single Linkage", xlab = "", sub = "", cex = .9, labels = F)
+```
+
+```{r}
+cutree(hc.single, 4)
+```
+
+Only one sample is classified as group 3 and 4, so single linkage provides unbalanced results.
+
+```{r}
+table(cutree(hc.complete, 4), lung_df2$Label)
+```
+
+```{r}
+table(cutree(hc.average, 4), lung_df2$Label)
+```
+
+```{r}
+avg_dend_obj <- as.dendrogram(hc.average)
+avg_col_dend <- color_branches(avg_dend_obj, k = 4)
+labels_colors(avg_col_dend) <- "white"
+plot(avg_col_dend)
+```
+
+### 3.2 K-means
+
+```{r}
+set.seed(2)
+km.out <- kmeans(sd.data, 4, nstart = 20)
+km.clusters <- km.out$cluster
+```
+
+```{r}
+hc.out <- hclust(dist(pca_res1$x[, 1:3]))
+plot(hc.out, labels = lung_df2$Label, main = "Hier. Clust. on First Three Score Vectors")
+```
+
+```{r}
+hc.clusters <- cutree(hc.out, 4)
+table(hc.clusters, lung_df2$Label)
+```
+
+```{r}
+set.seed(2)
+km.out <- kmeans(pca_res1$x[, 1:3], 4, nstart = 20)
+km.clusters <- km.out$cluster
+table(km.clusters, lung_df2$Label)
+```
+
+```{r}
+plot(pca_res1$x[, 1:3], col = km.out$cluster, pch = km.out$cluster)
+```
+
+```{r}
+table(km.clusters, hc.clusters)
+```
+
+Cluster 3 and 4 in hierarchical clustering are identical to Cluster 1 and 3 in K-means clustering. However, Cluster 1 in hierarchical clustering distributes into Cluster 2 and 3 in K-means clustering. Cluster 2 in hierarchical clustering distributes into Cluster 1 and 4 in K-means clustering.
